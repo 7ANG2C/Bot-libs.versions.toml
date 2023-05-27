@@ -1,0 +1,75 @@
+before_script:
+  - echo MR Commit Ref Name, $CI_COMMIT_REF_SLUG
+  - echo user id, $GITLAB_USER_ID
+  - echo user name, $GITLAB_USER_NAME
+  - echo user email, $GITLAB_USER_EMAIL
+  - echo Builder DIR, $CI_BUILDS_DIR
+  - echo Project Name, $CI_PROJECT_NAME
+  - echo Project Url, $CI_PROJECT_URL
+  - echo Runner ID, $CI_RUNNER_ID
+  - echo Runner Description, $CI_RUNNER_DESCRIPTION
+  - export COMMIT_SHORT_SHA=$(git log -1 --pretty="%h")
+  - export COMMIT_USER_NAME=$(git log -1 --pretty="%cn")
+  - export COMMIT_TIME=$(git log -1 --pretty="%cd")
+  - export COMMIT_SUBJECT=$(git log -1 --pretty="%s")
+  - export COMMIT_BODY=$(git log -1 --pretty="%b")
+  - export COMMIT_RAW_BODY=$(git log -1 --pretty="%B")
+  - export COMMIT_DESCRIBE=$(git describe)
+  - NEWLINE=$'\n'
+  - echo Commit Short Sha, $COMMIT_SHORT_SHA
+  - echo Commit User Name, $COMMIT_USER_NAME
+  - echo Commit Time, $COMMIT_TIME
+  - echo Commit Subject, $COMMIT_SUBJECT
+  - pwd
+  - export ANDROID_HOME=~/Library/Android/sdk
+  - export PATH=$PATH:~/Library/Android/sdk/platform-tools/
+  - chmod +x ./gradlew
+
+cache:
+  key: ${CI_PROJECT_ID}
+  paths:
+    - .gradle/
+
+stages:
+  - update_toml
+  - version_build_deploy
+
+# CRON: 0 12 * * FRI
+update_version_toml:
+  script:
+    - |
+      VERSION_FILE=libs.versions.toml
+      REMOTE_CONTENT=$(curl --header "PRIVATE-TOKEN: $PAT" "$CI_SERVER_URL/api/v4/projects/${PROJECT_ID}/repository/files/version%2F$VERSION_FILE/raw?ref=master")
+      REMOTE_VERSION=$(echo "$REMOTE_CONTENT" | head -n 1)
+      echo Remote $REMOTE_VERSION
+      LOCAL_CONTENT=$(cat **/$VERSION_FILE)
+      LOCAL_VERSION=$(echo "$LOCAL_CONTENT" | head -n 1)
+      echo Local $LOCAL_VERSION
+    - |
+      if [[ $REMOTE_VERSION != $LOCAL_VERSION ]]; then
+        FEATURE_NAME="feature/${REMOTE_VERSION// /_}"
+        git checkout -b $FEATURE_NAME
+        echo "$REMOTE_CONTENT" > **/$VERSION_FILE
+        git add */$VERSION_FILE
+        git commit -m "update_toml_to_$REMOTE_VERSION"
+        git push http://:${PAT}@$CI_SERVER_HOST:$CI_SERVER_PORT/$CI_PROJECT_PATH.git $FEATURE_NAME:$FEATURE_NAME
+      fi
+  stage: update_toml
+  only:
+    - schedules
+
+deploy_version_to_app_tester:
+  script:
+    - |
+      if ./gradlew app:assembleDebug; then
+        firebase appdistribution:distribute app/build/outputs/apk/debug/*.apk --app ${APP_ID} --release-notes "$CI_COMMIT_MESSAGE" --groups ${GROUP_NAME}
+        echo "Build Version Success."
+      else
+        echo "Build Version Fail."
+      fi
+  stage: version_build_deploy
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /^update_toml_to_/
+  artifacts:
+    paths:
+      - app/build/outputs/apk/debug/*.apk
